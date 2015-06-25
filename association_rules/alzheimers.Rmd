@@ -1,0 +1,108 @@
+---
+title: "Association Rule Analysis: Alzheimer Symptoms"
+author: "Ralph Schlosser, ralph.schlosser@gmail.com"
+output: pdf_document
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(BayesLCA)
+library(arules)
+library(arulesViz)
+data(Alzheimer)
+alzMat <- as.matrix(Alzheimer)
+Alzheimer.trans <- as(alzMat, "transactions")
+```
+
+## Introduction
+The goal of this homework is to perform an association rule analysis using the `arules` package on the presence / absence of six symptoms found in patients suffering from early onset Alzheimer's disease. The underlying data set is called `Alzheimer` and it is contained in the `BayesLCA` \textsf{R} package.
+
+## Analysis
+```{r echo=FALSE, eval=FALSE}
+print(Alzheimer.trans)
+```
+
+***Initial observations*** Using the `summary` command we can learn that the data set records 240 transactions for the 6 items (symptoms). Also, the symptoms Affective and Activity are the most frequent ones with empirical probabilities $p_{\mbox{Affective}} = 181 / 240 \approx 0.75$ and $p_{\mbox{Activity}} = 157 / 240 \approx 0.65$. The other probabilities (or proportions) can be reviewed by restricting the `apriori` algorithm to only generate rules of length 1:
+
+```{r eval=FALSE}
+fit1 <- apriori(Alzheimer.trans, 
+                parameter = list(confidence = 0, support = 0.1, minlen = 1, maxlen = 1))
+```
+
+A visual representation of these proportions can be obtained using the `itemFrequencyPlot` command:
+
+```{r echo=FALSE, fig.width=3, fig.height=3}
+itemFrequencyPlot(Alzheimer.trans, cex.names=0.8)
+```
+
+***Association rules mining*** Moving on to rules of length two, we can also add further measures of interest, such as lower and upper *Frechet* bounds for the lift which allow us to interpret the lift value found in relation to it's theoretical boundaries.
+
+```{r echo=FALSE, results='hide'}
+fit1 <- apriori(Alzheimer.trans, parameter = list(minlen = 2, maxlen = 2))
+fit1 <- sort(fit1, by="lift")
+qual1 <- quality(fit1)
+
+# Add extra interest measures to the rules.
+PA <- qual1$support / qual1$confidence
+PB <- qual1$confidence/qual1$lift
+
+# Add frechet bounds.
+UB <- cbind(1 / PA, 1 / PB)
+UB <- apply(UB, 1, min)
+LB <- cbind(0, 1 / PA + 1 / PB - 1 / (PA * PB))
+LB <- apply(LB, 1, max)
+quality(fit1) <- data.frame(qual1, LB, UB)
+```
+
+When using the default settings (i.e. min. confidence $=0.8$ and min. support $=0.1$) we get a total of three interesting looking rules:
+```{r echo=FALSE}
+inspect(fit1)
+```
+The presence of any of the symptoms Agitation, Agression, Diurnal seems to imply that Affective is also present as a symptom. This is supported by the fact that the respective lifts are larger than one and reasonably close to the theoretical upper boundary. 
+
+```{r echo=FALSE, results='hide'}
+fit1 <- apriori(Alzheimer.trans, parameter = list(minlen = 3, maxlen = 3))
+fit1 <- sort(fit1, by="lift")
+qual1 <- quality(fit1)
+
+# Add extra interest measures to the rules.
+PA <- qual1$support / qual1$confidence
+PB <- qual1$confidence/qual1$lift
+
+# Add frechet bounds.
+UB <- cbind(1 / PA, 1 / PB)
+UB <- apply(UB, 1, min)
+LB <- cbind(0, 1 / PA + 1 / PB - 1 / (PA * PB))
+LB <- apply(LB, 1, max)
+
+chiSq <- interestMeasure(fit1, "chiSquared", Alzheimer.trans)
+quality(fit1) <- data.frame(qual1, LB, UB, chiSq)
+```
+
+For rules of length three we get six rules with two items on the left hand side and one item on the right hand side (using `apriori` with defaults). In the scatter plot for these rules we see support, confidence and lift (shading) for each rule.
+```{r echo=FALSE, fig.width=4, fig.height=3}
+plot(fit1, cex.names=0.6)
+```
+
+The top three rules sorted by lift are:
+
+```{r echo=FALSE}
+inspect(fit1[1:3])
+```
+
+Just as before the algorithm yields rules involving Agression, Agitation and Affective, which is unsurprising given that these items (individually) have the highest support in the data set. A new addition to this is a rule involving Activity. 
+
+Again we find that the rules produced exhibit a lift higher than 1 which, together with the high confidence, suggests that these rules are interesting ones.
+
+The printout above also has a $\chi^2$ test column (`chiSq`). These are the results of a statistical test of independence of the left and right hand side of the mined rules. At $\alpha=0.05$ the critical value is $\chi^2=3.84$. Higher values, as above, indicate that left and right hand side are *not* independent (for the given $\alpha$), i.e. the rule is not just a random one. This is another measure of interestingness. Furthermore, it seems there are no rules of length 4 and higher that can be mined from the data set using `apriori`.
+
+## Conclusion and discussion
+
+***Results*** We have found that the presence of Agitation, Agression and Diurnal also implies that Affective is present as a symptom. Furthermore, when both Agression and Agitation are found it is very likely to also find symptoms of Affective or Agility. Rules involving four and more items could not be found.
+
+***Weaknesses*** **(1)** More emphasis could have been placed on exploring how lift and other measures of interest vary with changing minimum support and confidence. This information could then have been used in a subsequent step to prune the initially derived rules. 
+
+**(2)** Defining a minimum support leads to rules being omitted, but they could be interesting, e.g. from a medical point of view. For example, there are only 19 entries in the data set involving Hallucination, but we did not find any rules that are "interesting"" according to the given thresholds, *and* contain Hallucination as a symptom.
+
+```{r echo=FALSE, eval=FALSE}
+length(Alzheimer[Alzheimer$Hallucination==1, ]$Hallucination)
+```
