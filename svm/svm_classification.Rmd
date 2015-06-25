@@ -1,0 +1,167 @@
+---
+title: "Predicting with SVM models"
+author: "Ralph Schlosser, ralph.schlosser@gmail.com"
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_width: 12
+    fig_height: 7
+geometry: margin=1.3cm
+---
+
+```{r chunk1, echo=FALSE, message=FALSE}
+library(kernlab)
+library(randomForest)
+library(RColorBrewer)
+
+#
+# Data preparation.
+#
+party.data <- read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/voting-records/house-votes-84.data", sep=",")
+colnames(party.data ) <- c("Party", paste("Vote", 1:16, sep=""))
+party.data[party.data  == "?"] <- "n"
+
+# I will remove "party" from the data so that we only analyze votes.
+#dat <- dat[, -1]
+
+#datnew <- 1 * (dat == "y")
+#colnames(datnew) <- paste("Yes", 1:16, sep="")
+
+# Kernels to compare.
+kernels <- c("rbfdot", "polydot",  "vanilladot", "tanhdot")
+
+# Calculate accuracy.
+accuracy <- function(tab) {
+  sum(diag(tab)) / sum(tab)
+  }
+
+#
+# The number of runs. Used below.
+#
+runs <- 20
+
+# Run a comparison of 4 different SVMs.
+comparison <- function(data, iterlim) {
+  # Supress output.
+  sink("/dev/null")  
+  set.seed(1000)
+  res.valid <- matrix(NA, iterlim, length(kernels) + 1)
+  res.test <- matrix(NA, iterlim, length(kernels) + 1)
+  colnames(res.valid) <- c(kernels, "randomForest")
+  colnames(res.test) <-  c(kernels, "randomForest")
+  
+  for (iter in 1:iterlim) {    
+    # 1. Split data into training, validation and test set.
+    N <- nrow(data)
+    indtrain <- sample(1:N, size=0.50 * N, replace=FALSE)
+    indtrain <- sort(indtrain)
+    indvalid <- sample(setdiff(1:N, indtrain), size=0.25 * N)
+    indvalid <- sort(indvalid)
+    indtest <- setdiff(1:N, union(indtrain, indvalid))
+    
+    fits <- list()
+    predictions <- list()
+    tabs <- list()    
+    
+    # 2. Classify using all kernels on training data first.
+    for(krn in kernels) {
+      fits[[krn]] <- ksvm(Party ~ ., data=data[indtrain, ], kernel=krn)
+      predictions[[krn]] <- predict(fits[[krn]], newdata=data)
+      tabs[[krn]] <- table(data$Party[indvalid], predictions[[krn]][indvalid])
+      # Validation accuracy.
+      res.valid[iter, krn] <- accuracy(tabs[[krn]])
+      }
+    
+    # 3. Apply all kernels to test set
+    # and record the test set accuracy.
+    for(krn in kernels) {
+      tab <- table(data$Party[indtest], predictions[[krn]][indtest])
+      # Test accuracy.
+      res.test[iter, krn] <-  accuracy(tab)
+      }
+    
+    # Compare to random forest.
+    fit.rf <- randomForest(Party ~., data=data, subset=indtrain)
+    pred.rf = predict(fit.rf, newdata = data, type="class")
+    tab.rf.valid <- table(data$Party[indvalid], pred.rf[indvalid])
+    tab.rf.test <- table(data$Party[indtest], pred.rf[indtest])
+    res.valid[iter, "randomForest"] <- accuracy(tab.rf.valid)
+    res.test[iter, "randomForest"] <- accuracy(tab.rf.test)    
+    }
+  sink()
+  return(list(test=res.test, valid=res.valid))
+  }
+```
+
+# Introduction
+
+In this report it is intended to apply *Support Vector Machines* (SVMs) to a classification problem. Specifically I am interested in comparing the classification accuracy of four different kernels and see how well they do against Random Forest classification. The `kernlab` library provides the implementation for kernels and SVM algorithms used in this report. The data set we are considering is the 1984 US Congress election data (see URL below), and we are looking at how accurately we can predict the political party of a candidate based on number on their received votes.
+
+# Methodology
+The election data set records 435 rows with 16 columns for the votes (yes or no) and a 17th column indicating the political party a candidate belongs to.
+
+The original file containing the data can be retrieved from:
+
+`http://archive.ics.uci.edu/ml/machine-learning-databases/voting-records/house-votes-84.data`. 
+
+Before running the algorithms all the votes recorded as `"?"` were changed into `"n"`.
+
+The principal comparison methodology is as follows:
+
+1. Divide data in to training, validation and test set with a split of $50\%, 25\%, 25\%$, respectively.
+2. Fit SVMs using different kernels on training data.
+3. Use fitted SVMs to predict on validation data and calculate **validation set accuracy**. At this stage we could have evaluated the accuracy to determine the kernel that works best for the given data. But instead of selecting a single best classifier, I am recording the validation set accuracy for all SVMs.
+4. Using the fitted SVMs from above, predict on the test set and calculate **test set accuracy**.
+5. Build a Random Forest classifier, predict on test and validation set and calculate the same accuracy measures as above.
+
+The above steps are repeated `r runs` times so as to be able to look at summary statistics later.
+
+The following kernels were used with the SVMs: `r kernels`.[^1] 
+
+[^1]: The vignette for `kernlab` as well as the help file discusses various "tuning" parameters that can be supplied to kernels. Due to time constraints, I couldn't spend more time on studying their effects on results, so only **default** settings, like e.g. automatic choice of the `sigma` parameter for `rbfdot` were used.
+
+# Results
+
+```{r chunk2, echo=FALSE}
+# Run comparison.
+r <- comparison(party.data, runs)
+```
+
+For the test set accuracy we get the following summary:
+```{r echo=FALSE}
+apply(r$test, 2, summary)
+```
+
+It is clear that rbfdot, polydot, and vanilladot are very similar in their results and achieve the same test set prediction accuracy on average. Also, the random forests approach predicts the political party with -- again -- a very similar accuracy, so the mentioned SVMs don't seem to have an advantage / disadvantage here as far as the results are concerned.
+
+Only the tanhdot kernel seems to be doing much worse in contrast to the others, and Random Forest, with a much lower average accuracy.
+
+Similar results are achieved when considering the validation set accuracy:
+
+```{r echo=FALSE}
+apply(r$valid, 2, summary)
+```
+
+We find that rbfdot, polydot, and vanilladot are marginally better on the validation data, while tanhdot seems to be doing a little worse. As before, Random Forest is on the same level as the first four kernels mentioned.
+
+Finally, in Figure 1, we can get an impression as to the fluctuation of results for test and validation set accuracy when plotting the achieved accuracy for each run. We again see the very good results described above for Random Forest as well as the SVMs, with the exception of tanhdot which also displays a higher variability.
+
+```{r chunk3a, echo=FALSE, fig.cap="Accuracy Plot"}
+# Create some nice plots.
+par(mfrow=c(1, 2))
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+cols <- brewer.pal(length(kernels) + 1, "Set2")
+matplot(1:runs, r$valid, type="l", col = cols, xlab="Run", ylab="Validation Set Accuracy")
+legend("bottomright", inset=.05, legend=c(kernels, "randomForest"), pch=1, col=cols, horiz=FALSE)
+matplot(1:runs, r$test, type="l", col = cols, xlab="Run", ylab="Test Set Accuracy")
+legend("bottomright", inset=.05, legend=c(kernels, "randomForest"), pch=1, col=cols, horiz=FALSE)
+par(mfrow=c(1, 1))
+```
+
+# Conclusion
+
+* Most of the SVM kernels tested did very well at predicting the political party of a candidate based on the votes.
+* Only the tanhdot kernel would seem to be a poor choice for this prediction problem.
+* In this example, there is no clear winner in terms of prediction accuracy, however there could be other advantages with certain algorithms, like e.g. computational efficiency, stability and so on. But I haven't looked into these further.
+* Also I haven't considered what effect differnt parameters for kernels (called *hyper-parameters* in the `ksvm` help) have on the prediction accuracy.
+* Due to above it is feasible that tanhdot could be improved with a "tuned" set of parameters.

@@ -1,0 +1,115 @@
+---
+title: "Clustering Analysis"
+author: "Ralph Schlosser, ralph.schlosser@gmail.com"
+output: pdf_document
+geometry: margin=1.3cm
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+setwd("~/Develop/data_analyses/clustering")
+lapsdata <- read.csv("data/laps.csv")
+
+# Remove NA values and -1
+lapsdata[is.na(lapsdata)] <- 0
+lapsdata[lapsdata == -1] <- 0
+```
+
+## Introduction
+
+For this analysis we are looking at data gathered from participants in the IAU World 24 Hour Championships in 2013. Specifically we are interested in finding clusters of runners with similar lap times.
+
+In total, the data set contains 260 rows of data with 28 columns. The lap counts are given in columns 5 to 28. There were a few ``NA`` values and negative ($-1$) lap counts which have been coded as $0$ for the purpose of this analysis. Furthermore, we have omitted the columns Runner number, Name, Age and Country. 
+
+```{r eval=FALSE, echo=FALSE}
+# This is for looking at pairs of data.
+# Output is file, due to size.
+png("pairs.png", width=1920, height=1080, units="px")
+pairs(lapsdata[, 5:28])
+dev.off()
+```
+
+## Analysis
+First we run the **k-Means** algorithm with an increasing number of clusters and evaluate the **total within groups sum of squares** value, which *k-Means* tries to minimise. Also, we use $10$ randomized starts each time to reduce the possibility of converging towards a local minimum.
+
+```{r echo=FALSE, fig.width=4, fig.height=3}
+# Remove Name, Age, and Country columns.
+data <- lapsdata[, -c(1, 2, 3, 4)]
+
+# Scale data.
+data <- scale(data)
+# Determine number of clusters.
+# First value is calculated as below:
+wss <- (nrow(data) - 1) * sum(apply(data, 2, var))
+for (i in 2:15) {
+  wss[i] <- kmeans(data, centers=i, nstart = 10)$tot.withinss
+}
+
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+  ylab="Total Within Groups Sum of Squares")
+
+CL <- 4
+
+points(CL, wss[CL], col = "red")
+```
+
+The plot seems to suggest that the total within groups sum of squares does not further decrease significantly after $k=4$ clusters, so it would appear that there are four groups of runners doing similar laps per hours. Below is a plot of the groups of runners:
+
+```{r echo=FALSE, message=FALSE, fig.width=6, fig.height=3}
+fitkm <- kmeans(data, CL, nstart = 10)
+
+library(cluster) 
+clusplot(data, fitkm$cluster, main="Groups of Runners", color=TRUE, shade=TRUE, lines=0)
+```
+
+However, when looking at the average *silhouette* value as a measure of closeness of a data point to their own cluster, it turns out that this value is actually fairly low. In fact, there are data points which are closer to another cluster than to the one they have been assigned to by *k-Means*:
+
+```{r echo=FALSE}
+dkmeans <- dist(data, method="euclidean")^2
+silkmeans<-silhouette(fitkm$cluster, dkmeans)
+mean(silkmeans[, 3])
+```
+
+The data points "closer" to another cluster than their own have **negative** silhouette values (The below shows the indices of those values).
+```{r echo=FALSE}
+which(silkmeans[, 3] < 0)
+```
+
+And indeed, using a another methodology, **k-Medoids**, we get slightly different result from above. For this run, we are using the ``pamk`` function from the ``fpc`` package to first determine the optimum number of clusters and use that as an input to the *k-Medoids* algorithm with (again) Euclidean distance.
+
+```{r echo=FALSE, fig.height=4}
+par(mfrow = c(1, 2))
+library(fpc)
+best.k <-pamk(data)
+fitpam <- pam(data, k=best.k$nc, metric="euclidean")
+dmed <- dist(data, method="euclidean")^2
+silmed<-silhouette(fitpam$clustering, dmed)
+clusplot(fitpam, best.k$nc, main="Groups of Runners", color=TRUE, shade=TRUE, lines=0)
+plot(silmed, col=c("red", "blue"), main="Silhouette", cex.names=0.6)
+```
+
+As we can see, grouping runners into $k=2$ groups gives a better average silhouette value. Finally we can re-run the above *k-Means* algorithm with $k=2$ and compare to the results we just got. First the average silhouette value:
+
+```{r echo=FALSE}
+fitkm2 <- kmeans(data, 2, nstart = 10)
+silkmeans2<-silhouette(fitkm2$cluster, dkmeans)
+mean(silkmeans2[, 3])
+```
+
+Then we can cross tabulate the results and calculate the percentage of data points that agree in both clusterings:
+
+```{r echo=FALSE}
+library(e1071)
+tab<-table(fitkm2$cluster, fitpam$clustering)
+classAgreement(tab)$diag
+```
+
+Here the percentage yielded suggest a reasonable agreement. The above also gives us a **Rand index** of `r classAgreement(tab)$rand` which further supports the agreement.
+
+## Conclusion and discussion
+
+* We have compared results of *k-Means* as well as *k-Medoids* algorithms to group the data. *k-Medoids* seemed to be more precise.
+
+* Initially it looked as though there were four groups of runners, but reducing the number of groups (or clusters) to two gives better cluster coherence. This was supported by quality measures like **Silhouette** and **Rand index**.
+
+* For further analysis, age and country could also have been considered. Or clustering among runners in a shorter time frame, e.g. 3 hours.
+

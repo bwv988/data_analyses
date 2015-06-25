@@ -14,7 +14,7 @@ Alzheimer.trans <- as(alzMat, "transactions")
 ```
 
 ## Introduction
-The goal of this homework is to perform an association rule analysis using the `arules` package on the presence / absence of six symptoms found in patients suffering from early onset Alzheimer's disease. The underlying data set is called `Alzheimer` and it is contained in the `BayesLCA` \textsf{R} package.
+The goal of this work is to perform an association rule analysis using the `arules` package on the presence / absence of six symptoms found in patients suffering from early onset Alzheimer's disease. The underlying data set is called `Alzheimer` and it is contained in the `BayesLCA` \textsf{R} package.
 
 ## Analysis
 ```{r echo=FALSE, eval=FALSE}

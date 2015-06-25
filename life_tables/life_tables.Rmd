@@ -1,0 +1,558 @@
+---
+title: "Life Tables Study"
+author: "Ralph Schlosser, ralph.schlosser@gmail.com"
+output: 
+  pdf_document:
+    fig_caption: yes
+    fig_width: 6
+    fig_height: 4
+geometry: margin=1.3cm
+---
+
+```{r chunk1, echo=FALSE, message=FALSE}
+# Load libraries and the data set.
+library (LifeTables)
+library(cluster)
+library(fpc)
+library(randomForest)
+library(e1071)
+
+data(MLTobs)
+
+# Join data for male and female for later prediction.
+alldata <- flt.mx.info
+alldata$sex <- "f"
+t <- mlt.mx.info
+t$sex <- "m"
+alldata <- rbind(alldata, t)
+
+
+#
+# Various helper functions
+#
+
+# Perform kmeans analysis.
+# Returns wss and avg. sil.
+kmeans.analysis <- function(data) {
+  set.seed(2000)
+  
+  # FIXME: Scale data???
+  #data <- scale(data)
+  # FIXME: Apply log???
+  #data <- log(data)
+  wss <- (nrow(data) - 1) * sum(apply(data, 2, var))
+  sils <- 0
+  d <- dist(data, method="euclidean")^2
+  for (i in 2:15) {
+    fitkm <- kmeans(data, centers=i, nstart = 10)
+    wss[i] <- fitkm$tot.withinss
+    sil <- silhouette(fitkm$cluster, d)    
+    sils[i] <- mean(sil[, 3])
+  }
+  return(data.frame(wss = wss, sils=sils))
+}
+
+# Performs k-Medoids analysis and returns results.
+kmedoids.analysis <- function(data) {
+  set.seed(2000)
+  
+  #data <- log(data)
+  best.k <-pamk(data)
+  fitpam <- pam(data, k=best.k$nc, metric="euclidean")
+  dmed <- dist(data, method="euclidean")^2
+  silmed <-silhouette(fitpam$clustering, dmed)
+  
+  return(list(sil = silmed, fit = fitpam,
+              best.k = best.k$nc))
+}
+
+# Calculate accuracy for a table.
+accuracy <- function(tab) {
+  sum(diag(tab)) / sum(tab)
+}
+
+# Iterate the given function 'method' 'maxiter' times
+# and return the mean accuracy.
+itermethod_raw <- function(method, maxiter, data) {
+  #set.seed(1000)
+    
+  resAcc <- 0
+  resImp <- ""
+  
+  for(i in 1:maxiter) {
+    r <- method(data)
+    resAcc[i] <- r$acc
+    resImp[i] <- as.character(r$maxImp)
+  }
+    
+  return(data.frame(acc=resAcc, imp=resImp))
+}
+
+# Random Forest classification.
+rndFor <- function(forest.data) {
+  N <- nrow(forest.data)
+  train <- sample(1:N, size=0.75 * N)
+  train <- sort(train)
+  test <- setdiff(1:N, train)
+
+  fit.rf <- randomForest(sex~., data = forest.data, subset = train)
+  pred.rf <- predict(fit.rf, newdata = forest.data, type="class")
+  
+  maxImpIdx <- which(fit.rf$importance == max(fit.rf$importance))
+  
+  res <- data.frame(acc = accuracy(table(forest.data$sex[test], pred.rf[test])),
+                    maxImp = row.names(fit.rf$importance)[maxImpIdx])
+  return(res)
+}
+
+# Used for adding cluster column
+add.cluster <- function(data, fit) {
+  return(unlist(fit$cluster, use.names = FALSE))
+}
+```
+
+# Introduction
+In this study I am focusing on life tables which record mortality rates for 24 different age groups ranging from 0 to 110+ years. These life tables were collected from the *Human Mortality Database* (University of California, Berkeley and Max Planck Institute for Demographic Research, 2009) and are available through the `LifeTables` package in `R`.
+
+There are two central questions I want to further investigate:
+
+1. Do the life tables fall into groups, where the mortality experience is similar across ages? Clearly characterize the clusters and interpret them.
+
+2. What is the difference between the life tables and clustering results for the female and male tables?
+
+For determining groups, the *k-Means* and *k-Medoids* clustering techniques are used to explore if there are clear groupings of similar mortality.
+
+In a second part, a *Random Forest* classification model is build to predict the gender based on the data set and also take a closer look at some of the earlier findings.
+
+
+## The data
+
+In total, there are 844 tables available for each gender. These tables record Location ID, Location Name, Subgroup type, Period and -- most importantly -- the age-specific mortality rates. As the data have previously been curated, no further post-processing was necessary in order to rectify potential defects like NAs, or erroneous values. The clustering analysis focuses entirely on the mortality rates, so the other columns were dropped before doing any clustering.
+
+## General observations
+
+To get a first impression at possible groupings, in Figure 1, I'm plotting the age group vs. mortality rate in a log-plot for each gender and all life tables. This gives the grey curves. Also, the mean mortality rate (red curve) has been added which makes it easier to see if there are certain trends.
+
+```{r chunk3, echo=FALSE, fig.width=8, fig.align='center', fig.cap="Initial Observations"}
+#
+# Some initial plots.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+
+# Construct a matrix with the mortality data for each table only.
+Yf <- flt.mx.info[, -(1:4)]
+Ym <- mlt.mx.info[, -(1:4)]
+
+# Calculate the mean for a visual inspection.
+meanMortF <- apply(Yf, 2, mean)
+meanMortM <- apply(Ym, 2, mean)
+
+# x is a vector containing the ages in the life tables.
+x <- c(0, 1, seq(5, 110, by=5))
+par(mfrow=c(1, 2))
+matplot(x, t(Yf), log="y", type="l", ylab="Mortality Rate", 
+        main="Female", xlab="Age Group", col="grey60")
+matpoints(x, meanMortF, log="y", type="l", col="red")
+matplot(x, t(Ym), log="y", type="l", ylab="Mortality Rate", 
+        main="Male", xlab="Age Group", col="grey60")
+matpoints(x, meanMortM, log="y", type="l", col="red")
+
+par(mfrow=c(1, 1))
+```
+
+Observations:
+
+* For ages 0 to around 10 years we can see a similar initial decline in mortality for both sexes.
+
+* From 10-35 years there appears to be a difference between males and females in how the mortality rates develop: The curve for male subjects exhibits an increase in mortality around the age of 20, followed by a small decrease afterwards, but the overall trend remains an increasing one for both sexes (people die eventually).
+
+* But for now it remains unclear if the effect is caused by some very large outliers alone, or if its a general trend that can be observed in all the data for males, so further investigation is required
+
+* That same "bump" in mortality cannot be observed for females in the average curve of the log-plot.
+
+* When overlaying the two averages curves (Figure 2) we can also see that from age 10 onward, males tend to have a higher mortality on average than females.
+
+```{rchunk3a, echo=FALSE, fig.align='center', fig.cap="Comparison of Average Trends"}
+#
+# Overlay plot.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+matplot(x, meanMortF, log="y", type="l", col="red", 
+        xlab="Age Group", ylab="Mortality Rate")
+matpoints(x, meanMortM, log="y", type="l", col="blue")
+```
+
+# Clustering Analysis using the k-Means Algorithm
+
+Apart from the data to cluster, the k-Means algorithm also requires to specify the number of clusters $k$ to use. An approximation for $k$ can be gotten by evaluating the two performance measures:
+
+1. Total Within Group Sum of Squares (Wss)
+2. Average Silhouette (Sil)
+
+For good *cluster coherence*, i.e. associating values with the cluster they "actually" belong to, we want the Wss value to be small and the Sil value to be large, so I'm looking for the $k$ providing the best compromise between those two.
+
+As k-Means is a *heuristic* algorithm, I have set the `nstart` parameter to 30 so as to make sure I get decent enough results. Also, for the distance matrix I am using Euclidean distance.
+
+## Clustering female subjects
+
+Figure 3 shows the cluster performance results for females. When evaluating the plots we find that $k=4$ delivers a good compromise between Wss and Sil. Any other choice would lead to lower cluster coherence.
+
+```{r chunk4, echo=FALSE, fig.align='center', fig.cap="Cluster Performance -- Females"}
+#
+# Female perf. plot
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+ret <- kmeans.analysis(Yf)
+par(mfrow=c(1, 2))
+plot(1:15, ret$wss, type="b", xlab="Number of Clusters",
+  ylab="Total Within Groups Sum of Squares")
+# Mark the chosen number of clusters.
+CL <- 4
+points(CL, ret$wss[CL], col = "red")
+plot(2:15, ret$sils[2:15], xlab="Number of Clusters", ylab="Average Silhouette")
+points(CL, ret$sils[CL], col = "red")
+par(mfrow=c(1, 1))
+```
+
+Figures 4 and 5 then shows two different views of the clustering we have achieved. This is included for analyzing how well the clusters are separated.
+
+```{r chunk4a, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (a) -- Females"}
+#
+# Female visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+data <- Yf
+set.seed(2000)
+d <- dist(data, method="euclidean")^2
+fitkm.female <- kmeans(data, CL, nstart = 30)
+plotcluster(data, fitkm.female$cluster, main="Mortality Groups")
+```
+
+```{r chunk4b, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (b) -- Females"}
+#
+# Female visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+sil <- silhouette(fitkm.female$cluster, d)
+plot(sil)
+```
+
+```{r chunk4c, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (c) -- Females"}
+#
+# Female visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+x <- c(0, 1, seq(5, 110, by=5))
+leg <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+matplot(x, t(fitkm.female$centers), type="l", lty=1, log="y", 
+        ylab="Cluster Centers", xlab="Age Group", col=c(2, 4, 6, 3))
+legend("bottomright", inset=.05, legend=leg, pch=1, col=c(2, 4, 6, 3), horiz=FALSE)
+```
+
+The following is a breakdown of mean mortality and number of observations per cluster to better understand the interpretation of the graphs.
+
+```{r chunk4d, echo=FALSE}
+#
+# Clusters summary.
+#
+data$cluster <- add.cluster(data, fitkm.female)
+cs <- table(fitkm.female$cluster)
+tab <- data.frame(Cluster=c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4"),
+                  MeanMortality=c(mean(apply(data[data$cluster==1, 1:24], 2, mean)),
+                             mean(apply(data[data$cluster==2, 1:24], 2, mean)),
+                             mean(apply(data[data$cluster==3, 1:24], 2, mean)),
+                             mean(apply(data[data$cluster==4, 1:24], 2, mean))), 
+                  ClusterSize=c(cs[1], cs[2], cs[3], cs[4]))
+tab
+```
+
+### Discussion of Results:
+
+* The data for females can be grouped into four clusters.
+* In the clustering generated, cluster 4 has the highest mean mortality, followed by clusters 3, 2 and 1.
+* In all four clusters we find a similar initial drop in mortality from 0 to 5 years.
+* The lowest mortality, again for all clusters, is around the 10+ years age g, which is yet another similarity.
+* After that mortality increases in a similar fashion for all clusters.
+* The mean mortality is lowest in cluster 1. This is also the cluster with the smallest number of observations.
+* The average silhouette value for cluster 1, as indicated in Figure 5, is the smallest achieved, so cluster 1 is probably not very well separated from the other clusters.
+* With the exception of cluster, 2 which seems to be best separated, there appears to be quite a bit of overlap between the other clusters; see also average mortality plot in Figure 6.
+* Due to the low silhouette and visible overlap from age 40+ years onward. This could suggest that we have probably overestimated the number $k$ of clusters.
+
+
+## Clustering male subjects
+
+Assessing the clustering performance results for male subjects yields an estimate of $k=3$ for the clusters to be used with the k-Means algorithm (Figure 7).
+
+Now the k-Means algorithm is started with the chosen $k$ and `nstart=30`.
+
+```{r chunk5, echo=FALSE, fig.align='center', fig.cap="Cluster Performance -- Males"}
+#
+# Male perf. plot
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+par(mfrow=c(1, 2))
+ret <- kmeans.analysis(Ym)
+plot(1:15, ret$wss, type="b", xlab="Number of Clusters",
+  ylab="Total Within Groups Sum of Squares")
+CL <- 3
+points(CL, ret$wss[CL], col = "red")
+plot(2:15, ret$sils[2:15], xlab="Number of Clusters", ylab="Average Silhouette")
+points(CL, ret$sils[CL], col = "red")
+par(mfrow=c(1, 1))
+```
+
+```{r chunk5a, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (a) -- Males"}
+#
+# Male visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+#data <- log(Ym)
+data <- Ym
+set.seed(2000)
+d <- dist(data, method="euclidean")^2
+fitkm.male <- kmeans(data, CL, nstart = 30)
+par(mfrow=c(1, 1))
+plotcluster(data, fitkm.male$cluster, main="Mortality Groups")
+```
+
+```{r chunk5b, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (b) -- Males"}
+#
+# Male visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+sil <- silhouette(fitkm.male$cluster, d)
+plot(sil)
+```
+
+```{r chunk5c, echo=FALSE, fig.align='center', fig.cap="Cluster Visualization (c) -- Males"}
+#
+# Male visualizations.
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+x <- c(0, 1, seq(5, 110, by=5))
+matplot(x, t(fitkm.male$centers), type="l", log="y", 
+        lty=1, ylab="Cluster Centers", xlab="Age Group", col=c(2, 4, 6))
+legend("bottomright", inset=.05, 
+       legend=c("Cluster 1", "Cluster 2", "Cluster 3"), pch=1, 
+       col=c(2, 4, 6), horiz=FALSE)
+```
+
+```{r chunk5d, echo=FALSE, fig.width=7, fig.align='center'}
+#
+# Clusters summary.
+#
+data$cluster <- add.cluster(data, fitkm.male)
+cs <- table(fitkm.male$cluster)
+tab <- data.frame(Cluster=c("Cluster 1", "Cluster 2", "Cluster 3"),
+                  MeanMortality=c(mean(apply(data[data$cluster==1, 1:24], 2, mean)),
+                             mean(apply(data[data$cluster==2, 1:24], 2, mean)),
+                             mean(apply(data[data$cluster==3, 1:24], 2, mean))), 
+                  ClusterSize=c(cs[1], cs[2], cs[3]))
+tab
+```
+
+
+### Discussion of results
+* The results indicate that males mortality rates can be grouped into three clusters.
+* Figure 10 exhibits a similar initial drop in mortality across the three clusters.
+* Also, all three clusters have a peak in mortality around the 20+ years age group.[^1]
+* Cluster 3 is the smallest cluster in terms of the number of observations in it. It also has the smallest silhouette value, so its internal coherence isn't that good (Figure 9).
+* Clusters 2 and 3 follow very similar patterns (see Figure 10) up until the 70+ year age group, where cluster 2 shows a faster increase in mortality, compared to cluster 3.
+* As before we observe a large degree of overlap between certain clusters.
+
+[^1]: There are a number of reasons that could explain this increase, like wars, or males tending to take on higher risks and thus being more susceptible to accidents etc. But based on the given data that would just be conjecture.
+
+# Clustering summary / Comparison between results for males and females
+
+1. We have shown that for both males and females the data can be grouped into clusters of very similar tendencies.
+2. The number of clusters is different for males and females, based on the criteria chosen to estimate $k$.[^2]
+3. Another difference is the increase in mortality for males in the 20+years group. There is no corresponding increase in the female life tables. A closer look at that increase is given in Figure 11.
+4. However there are other similarities, e.g. the initial drop in mortality rates and also the age group of minimum mortality is the same for both.
+
+```{r chunk8, echo=FALSE, fig.align='center', fig.cap="Mortality rates increase for males vs. females"}
+#
+# Zoomed-in view for comparison males / females
+#
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+
+actualx <- 4:10
+plot(actualx, log(meanMortF[actualx]), type="l", 
+     lty=1, ylab="Average Mortality Rate", xlab="Age Group", col=2, xaxt="n")
+axis(1, at=actualx, labels=c("10", "15", "20", "25", "30", "35", "40"))
+points(actualx, log(meanMortM[actualx]), type="l", col=4)
+legend("bottomright", inset=.05, 
+       legend=c("Female", "Male"), pch=1, col=c(2, 4), horiz=FALSE)
+```
+
+[^2]: This may not be correct, as was explained before, because the values for $k$ are just estimates. There was some indication that chosen $k$ for males was too large so if $k$ is actually $3$, both male an females would have the same number of clusters.
+
+# Clustering using the k-Medoids algorithm
+
+## General observations
+An alternative to k-Means is the _k-Medoids_ algorithm, where the cluster centers are not the means obtained from the data set, but actual data points.
+
+Below I'm only showing the silhouette plots achieved when using k-Medoids (Figure 12). The optimal number $k$ of clusters is determined by the `pamk` function using the `asw` (average silhouette width) criterion. This function can be found in the `fpc` library.
+
+```{r chunk9, echo=FALSE, fig.width=9, fig.cap="Silhouette results for k-Medoids"}
+par(cex.main=0.75, cex.sub=0.75, cex.lab=0.75)
+par(mfrow=c(1, 2))
+
+res.female <- kmedoids.analysis(Yf)
+plot(res.female$sil, main="Females")
+
+res.male <- kmedoids.analysis(Ym)
+plot(res.male$sil, main="Males")
+
+par(mfrow=c(1, 1))
+```
+
+These results differ somewhat from the ones we got using k-Means. The number of clusters for males is now only 2, whereas females were grouped into 3 clusters.
+
+Also I note that for females, cluster 1 has a very low silhouette value so it could be argued that actually there are fewer clusters for females than indicated.
+
+## Comparing k-Means and k-Medoids results
+
+It could be interesting to look at the class agreement between the results for k-Means and k-Medoids, i.e. how similar are the clustering results when the same number of clusters is used in both cases.
+
+```{r chunk13, echo=FALSE}
+# Calculate class agreement between k-Means and k-Medoids.
+
+# Re-run k-Means with same number of clusters as for k-Medoids.
+data <- Yf
+set.seed(2000)
+d <- dist(data, method="euclidean")^2
+fitkm.female <- kmeans(data, res.female$best.k, nstart = 30)
+
+data <- Ym
+set.seed(2000)
+d <- dist(data, method="euclidean")^2
+fitkm.male.new <- kmeans(data, res.male$best.k, nstart = 30)
+
+tabf <- table(fitkm.female$cluster, res.female$fit$clustering)
+femaleCA <- classAgreement(tabf)$diag
+tabm <- table(fitkm.male$cluster, res.male$fit$clustering)
+maleCA <- classAgreement(tabm)$diag
+```
+
+The results are as follows:
+
+* For females we achieve a class agreement of `r round(femaleCA * 100, 2)`$\%$. Here, `r res.female$best.k` cluster centers are used for both algorithms. 
+
+* For males `r round(maleCA * 100, 2)`$\%$.  The number of cluster centers is `r res.male$best.k`.
+
+These results suggest that a similar clustering is achieved when running both algorithms with the same number of clusters as input. But the class agreement is slightly lower for males. 
+
+One reason for this could be the large outliers first seen in Figure 1 which would affect the mean, but not the medoids.
+
+
+# Predicting gender 
+
+We could also explore as to whether we can predict the gender for an observation from its values, and, moreover, if that helps to shed further light on some of the gender differences we have seen before.
+
+```{r chunk10, echo=FALSE}
+# Prepare data for prediction.
+CL <- 3
+data <- alldata[, -c(1:4)]
+d <- dist(data[, -25], method="euclidean")^2
+set.seed(2000)
+fitkm.all <- kmeans(data[, -25], CL, nstart = 30)
+#data$cluster <- add.cluster(data, fitkm.all)
+#data$cluster <- as.factor(data$cluster)
+data$sex <- as.factor(data$sex)
+```
+
+For prediction, I am using _Random Forest_ classification. In preparation to this step, the data for males and females were combined and an additional column added to indicate the gender of the data set. This column serves as the response variable.
+
+In addition to that, for model building, the data was split up into training and test sets with $0.75\%$ and $0.25\%$ of all the data, respectively.
+
+```{r echo=FALSE}
+N <- 10
+```
+
+Finally, the random forest algorithm was run `r N` times and the average test set accuracy calculated.
+
+```{r chunk11, echo=FALSE}
+# Run random forest algorithm.
+r <- itermethod_raw(rndFor, N, data)
+```
+
+The average accuracy on the test set is: `r sum(r$acc) / N`. This is pretty good.
+
+Now we can consider the _variable importance_ to find out which variable(s) played the biggest impact in predicting male or female. For each run, I am recording the variable with the highest importance. A table of the results is displayed below:
+
+```{r chunk12, echo=FALSE}
+# Show table of most important variables.
+table(r$imp)
+```
+
+Here we can see that for *all* $N=$ `r N` runs, the 20+ years age group has the biggest impact for predicting the gender. 
+
+This is further evidence for what we have found before, i.e. that the main difference between male and female occurs around the 20+ years age group, and therefore it makes sense that this variable is also suitable for prediction.
+
+# Summary
+
+We have discussed in some detail what groupings exist in life tables for males and females. These groupings were achieved using both k-Means and k-Medoids approaches. Also similarities as well as differences between males and females were demonstrated. Using variable importance from prediction we were able to confirm a trend that was first observed when clustering.
+
+# Appendix: Code
+
+```{r ref.label="chunk1", eval=FALSE}
+```
+
+```{r ref.label="chunk3", eval=FALSE}
+```
+
+```{r ref.label="chunk3a", eval=FALSE}
+```
+
+```{r ref.label="chunk4", eval=FALSE}
+```
+
+```{r ref.label="chunk4a", eval=FALSE}
+```
+
+```{r ref.label="chunk4b", eval=FALSE}
+```
+
+```{r ref.label="chunk4c", eval=FALSE}
+```
+
+```{r ref.label="chunk4d", eval=FALSE}
+```
+
+```{r ref.label="chunk5a", eval=FALSE}
+```
+
+```{r ref.label="chunk5b", eval=FALSE}
+```
+
+```{r ref.label="chunk5c", eval=FALSE}
+```
+
+```{r ref.label="chunk5d", eval=FALSE}
+```
+
+```{r ref.label="chunk6", eval=FALSE}
+```
+
+```{r ref.label="chunk7", eval=FALSE}
+```
+
+```{r ref.label="chunk8", eval=FALSE}
+```
+
+```{r ref.label="chunk9", eval=FALSE}
+```
+
+```{r ref.label="chunk13", eval=FALSE}
+```
+
+```{r ref.label="chunk10", eval=FALSE}
+```
+
+```{r ref.label="chunk11", eval=FALSE}
+```
+
+```{r ref.label="chunk12", eval=FALSE}
+```
+
+
